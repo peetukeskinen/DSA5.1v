@@ -48,7 +48,7 @@ close all;
 
     % STOCHASTIC METHOD:
         % 1 = Normal Distribution Simulation
-        % 2 = Bootstrap Simulation
+        % 2 = Moving Block Bootstrap of the same historical shocks
 
     % SAVE RESULTS:
         % 1 = Save as .mat file
@@ -394,8 +394,15 @@ end
 % CHECK SCENARIOS NUMBERS!
 
 dataStoch = readmatrix(params.fileName, 'Range', 'I3:L97', 'Sheet', 'STOCH');
-dataStochBootdev = readmatrix(params.fileName, 'Range', 'C3:F49', 'Sheet', 'STOCH'); 
-%dataStochBootIMF = readmatrix(params.fileName, 'Range', 'O3:R49', 'Sheet', 'STOCH');
+
+% NOTE: both stochastic methods now draw from dataStoch, the quarterly Darvas
+% shock series (columns: short rate, long rate, nominal growth, primary
+% balance). The AMECO blocks on the same sheet, C3:F49 demeaned and O3:R49
+% raw, hold annual LEVELS of d_ngdp, pb, iir and sfa minus their sample mean.
+% They are not shocks: the implicit interest rate falls from about 10% in 1976
+% to about 1%, so demeaning it gives deviations of +/- 6 percentage points,
+% and using those as shocks drove the simulated implicit rate negative in
+% roughly 40% of path-years. Do not wire them back in as shocks.
 
 meanValues = mean(dataStoch);
 stdDevValues = std(dataStoch);
@@ -433,192 +440,147 @@ m_res_lt = 1/share_lt_maturing_t10; % average residual maturity of lt bonds
 if stochMethod == 1
     methodName = 'normal';
 elseif stochMethod == 2
-    methodName = 'bootdev';
-elseif stochMethod == 3
-    methodName = 'bootIMF';
+    methodName = 'bootblock';
 else
     methodName = 'unknown';
 end
 
 %% Generate quarterly shocks
+% Both methods produce the same object: nbr_q_shocks quarterly draws of the
+% four variables in dataClipped (short rate, long rate, nominal growth,
+% primary balance), laid out so that simulation path i owns rows
+% (i-1)*nbr_q_gen+1 : i*nbr_q_gen.  Everything after this block is shared, so
+% the methods differ only in how the quarterly shocks are drawn.
 
-if stochMethod == 1 % Normal Random Sampling
-    
-    
+if stochMethod == 1 % Normal random sampling from the historical covariance
+
     mu = zeros(1, nbr_vars);
     sigma = cov(dataClipped);
-    randSamples = mvnrnd(mu, sigma, nbr_q_shocks);
-    Sample = randSamples; 
+    Sample = mvnrnd(mu, sigma, nbr_q_shocks);
 
-    % reshape into yearly 4x4 matrices. now row: vars, column: quarter)
-    Rands=reshape(Sample',[nbr_q,nbr_vars,nbr_y_shocks]); % reshape
+elseif stochMethod == 2 % Moving block bootstrap of the historical shocks
 
-    %% Aggregate quarterly shocks to yearly
-    % create shell for yearly shocks
-    Shock = zeros(nbr_y_shocks,nbr_vars); 
-    % store yearly shocks
-    e_i_st = zeros(nbr_sim_paths,T_stochastic); % shells
-    e_g = zeros(nbr_sim_paths,T_stochastic);
-    e_pb = zeros(nbr_sim_paths,T_stochastic);
+    % Resample dataClipped in blocks rather than drawing from a fitted normal,
+    % so the draws keep the empirical distribution and the serial and cross
+    % correlation of the historical shocks.  Blocks are blockSize YEARS long,
+    % so a block carries a run of quarters that actually occurred together.
+    blockSize = 2;                          % block length in years, 1 to 5
+    blockQ = nbr_q*blockSize;               % block length in quarters
+    numBlocks = ceil(nbr_q_gen/blockQ);     % blocks needed for one path
+    sampleSize = size(dataClipped, 1);      % quarters of historical data
 
-    % get yearly shock by summing quarterly shocks
-    for i=1:nbr_y_shocks
-    Shock(i,:)=sum(Rands(:,:,i),2)';
-    end
+    Sample = zeros(nbr_q_shocks, nbr_vars);
 
-    % reshape (variable, 5-year forecast, N copies)
-    Shock = reshape(Shock',[nbr_vars T_stochastic nbr_sim_paths]);
-
-    for i=1:nbr_sim_paths
-    e_i_st(i,:) = Shock(1,:,i); % short term market interest rate
-    e_g(i,:) = Shock(3,:,i);    % nominal gdp growth rate
-    e_pb(i,:) = Shock(4,:,i);   % primary balance
-    end
-
-%% Construct long term interest rate shocks
-    shock_i_lt = Sample(:,2); % generated quarterly i_lt shocks
-    % use function sumq2y to get persistent yearly shocks
-    [e_i_lt] = sumq2y(shock_i_lt,m_res_lt,T_stochastic);
-
-    % add zeros to get correct dimensions
-    % iir shock
-    i_st_shock = [zeros(pre_stoch,nbr_sim_paths); e_i_st'; zeros(post_stoch,nbr_sim_paths)];
-    i_lt_shock = [zeros(pre_stoch,nbr_sim_paths); e_i_lt'; zeros(post_stoch,nbr_sim_paths)];
-
-    iir_shock = alpha_initial.*i_st_shock + (1-alpha_initial).*i_lt_shock; 
-    % gdp and pb shocks
-    g_shock = [zeros(pre_stoch,nbr_sim_paths); e_g'; zeros(post_stoch,nbr_sim_paths)];
-    pb_shock = [zeros(pre_stoch,nbr_sim_paths); e_pb'; zeros(post_stoch,nbr_sim_paths)];
-
-%% Project debt paths under stochastic scenarios
-
-    % shell for final 3D stochastic debt matrix 
-    D_stoch = zeros(totalPeriods,length(adjustmentGrid),nbr_sim_paths);
-
-    % Initialize waitbar
-    h = waitbar(0, 'Running simulations...');
-
-    % Loop through stochastic shocks...
-    for k = 1:nbr_sim_paths
-
-        % Update waitbar
-        waitbar(k/nbr_sim_paths, h, sprintf('Calculate stochastic debt path %d of %d', k, nbr_sim_paths));
-
-        D_temp = zeros(totalPeriods,length(adjustmentGrid)); % shell
-        iir_stoch = iir_shock(:,k); % iir
-        g_stoch = g_shock(:,k); % nominal gdp growth
-        pb_stoch = pb_shock(:,k); % primary balance
-
-        % ... and through values of adjustmentGrid
-        for i = 1:length(adjustmentGrid)
-
-            [D_temp(:,i),~,~,~,~,~,~,~,~] = project_debt5_1v(scenario,adjustmentGrid(i), iir, potgdp,...
-                og, epsilon,m,dcoa,dprop,sfa,inflation,rgdp_initial, debt_initial,alpha_initial,beta_initial, spb,...
-               i_st,i_lt,...
-                share_lt_maturing,pb,ob,sb,stochMethod,g_stoch,...
-                pb_stoch,iir_stoch,adjustmentPeriods,theta_lt);
-        end
-
-    % store 2D matrix
-    D_stoch(:,:,k) = D_temp;
-    end
-
-    % Close waitbar after completion
-    close(h);
-   
-elseif stochMethod == 2 % block bootstrap using deviations as shocks
-
-    % Shell for final 3D stochastic debt matrix 
-    D_stoch = zeros(totalPeriods, length(adjustmentGrid), nbr_sim_paths);
-
-    % Sampling with Block-Bootstrap Approach
-    blockSize = 2; % Set block size between 1 and 5
-    nbr_boots = 5; % Total number of periods to generate in one simulation
-
-    % Compute the number of blocks needed
-    numBlocks = ceil(nbr_boots / blockSize);
-
-    % Load Stoch Boot data (d_rgdp, pb, iir, sfa)
-    sampleSize = size(dataStochBootdev, 1); % Sample size
-
-    % Initialize bootstrapSamples as a 3D array
-    bootstrapSamples = zeros(totalPeriods, size(dataStochBootdev, 2), nbr_sim_paths);
-
-    % Create block bootstrap sample
     for i = 1:nbr_sim_paths
 
-        % Preallocate blockStartIdx with zeros
-        blockStartIdx = zeros(nbr_boots, 1);
-
-        currentIdx = 1; % Initialize the index to place the block indices
+        bootIdx = zeros(nbr_q_gen, 1);
+        currentIdx = 1;                     % where the next block starts
 
         for b = 1:numBlocks
-            % Draw a random starting index for the block
-            blockStart = randi([1, sampleSize - blockSize + 1]);
+            % Draw a random starting quarter for the block
+            blockStart = randi([1, sampleSize - blockQ + 1]);
 
-            % Generate indices for the block of size blockSize
-            blockIndices = blockStart : blockStart + blockSize - 1;
+            % Generate indices for the block
+            blockIndices = blockStart : blockStart + blockQ - 1;
 
-            % Determine how many indices we can copy without exceeding nbr_boots
-            numIndicesToCopy = min(blockSize, nbr_boots - currentIdx + 1);
+            % Keep only as many as still fit in one simulation path
+            numIndicesToCopy = min(blockQ, nbr_q_gen - currentIdx + 1);
 
-            % Copy the indices into blockStartIdx
-            blockStartIdx(currentIdx : currentIdx + numIndicesToCopy - 1) = blockIndices(1:numIndicesToCopy)';
+            bootIdx(currentIdx : currentIdx + numIndicesToCopy - 1) = ...
+                blockIndices(1:numIndicesToCopy)';
 
-            % Update currentIdx
             currentIdx = currentIdx + numIndicesToCopy;
 
-            % If we've filled blockStartIdx, exit the loop
-            if currentIdx > nbr_boots
+            if currentIdx > nbr_q_gen
                 break;
             end
         end
 
-        % Select the data for the current simulation path
-        selectedBlock = dataStochBootdev(blockStartIdx, :);
+        % Place this path's quarters where the shared reshape expects them
+        Sample((i-1)*nbr_q_gen + (1:nbr_q_gen), :) = dataClipped(bootIdx, :);
 
-        % Determine where to place the selected block in bootstrapSamples
-        bootStart = adjustmentEndPeriod + 1;
-        bootEnd = adjustmentEndPeriod + nbr_boots;
-
-        % Store the selected data in the 3D array
-        bootstrapSamples(bootStart:bootEnd, :, i) = selectedBlock;
     end
 
-    % Initialize waitbar
-    h = waitbar(0, 'Running simulations...');
-
-    % Loop through stochastic shocks...
-    for k = 1:nbr_sim_paths
-
-        % Update waitbar
-        waitbar(k / nbr_sim_paths, h, sprintf('Calculate stochastic debt path %d of %d', k, nbr_sim_paths));
-
-        D_temp = zeros(totalPeriods, length(adjustmentGrid)); % Temporary matrix for current simulation
-
-        % Extract variables for the current simulation
-        g_stoch = bootstrapSamples(:, 1, k);  % Nominal GDP growth
-        pb_stoch = bootstrapSamples(:, 2, k); % Primary balance
-        iir_stoch = bootstrapSamples(:, 3, k); % Implicit interest rate
-
-        % Loop through values of 'adjustmentGrid'
-        for idx_a = 1:length(adjustmentGrid)
-            [D_temp(:, idx_a), ~, ~, ~, ~, ~, ~, ~, ~] = project_debt5_1v(...
-                scenario, adjustmentGrid(idx_a), iir, potgdp, og, epsilon, m, dcoa, dprop, sfa, inflation, ...
-                rgdp_initial, debt_initial, alpha_initial, beta_initial, spb, i_st, i_lt, ...
-                share_lt_maturing, pb, ob, sb, stochMethod, g_stoch, pb_stoch, iir_stoch, adjustmentPeriods,theta_lt);
-        end
-
-        % Store the results in the 3D matrix
-        D_stoch(:, :, k) = D_temp;
-    end
-
-    % Close waitbar after completion
-    close(h);
-    
 else
     error('Invalid selection. Please choose 1 or 2.');
 end
+
+%% Aggregate quarterly shocks to yearly
+
+% reshape into yearly 4x4 matrices. now row: vars, column: quarter)
+Rands = reshape(Sample', [nbr_q, nbr_vars, nbr_y_shocks]); % reshape
+
+% create shell for yearly shocks
+Shock = zeros(nbr_y_shocks, nbr_vars);
+% store yearly shocks
+e_i_st = zeros(nbr_sim_paths, T_stochastic); % shells
+e_g = zeros(nbr_sim_paths, T_stochastic);
+e_pb = zeros(nbr_sim_paths, T_stochastic);
+
+% get yearly shock by summing quarterly shocks
+for i = 1:nbr_y_shocks
+Shock(i,:) = sum(Rands(:,:,i), 2)';
+end
+
+% reshape (variable, 5-year forecast, N copies)
+Shock = reshape(Shock', [nbr_vars T_stochastic nbr_sim_paths]);
+
+for i = 1:nbr_sim_paths
+e_i_st(i,:) = Shock(1,:,i); % short term market interest rate
+e_g(i,:) = Shock(3,:,i);    % nominal gdp growth rate
+e_pb(i,:) = Shock(4,:,i);   % primary balance
+end
+
+%% Construct long term interest rate shocks
+shock_i_lt = Sample(:,2); % quarterly i_lt shocks
+% use function sumq2y to get persistent yearly shocks
+[e_i_lt] = sumq2y(shock_i_lt, m_res_lt, T_stochastic);
+
+% add zeros to get correct dimensions
+% iir shock
+i_st_shock = [zeros(pre_stoch,nbr_sim_paths); e_i_st'; zeros(post_stoch,nbr_sim_paths)];
+i_lt_shock = [zeros(pre_stoch,nbr_sim_paths); e_i_lt'; zeros(post_stoch,nbr_sim_paths)];
+
+iir_shock = alpha_initial.*i_st_shock + (1-alpha_initial).*i_lt_shock;
+% gdp and pb shocks
+g_shock = [zeros(pre_stoch,nbr_sim_paths); e_g'; zeros(post_stoch,nbr_sim_paths)];
+pb_shock = [zeros(pre_stoch,nbr_sim_paths); e_pb'; zeros(post_stoch,nbr_sim_paths)];
+
+%% Project debt paths under stochastic scenarios
+
+% shell for final 3D stochastic debt matrix
+D_stoch = zeros(totalPeriods,length(adjustmentGrid),nbr_sim_paths);
+
+% Initialize waitbar
+h = waitbar(0, 'Running simulations...');
+
+% Loop through stochastic shocks...
+for k = 1:nbr_sim_paths
+
+    % Update waitbar
+    waitbar(k/nbr_sim_paths, h, sprintf('Calculate stochastic debt path %d of %d', k, nbr_sim_paths));
+
+    D_temp = zeros(totalPeriods,length(adjustmentGrid)); % shell
+    iir_stoch = iir_shock(:,k); % iir
+    g_stoch = g_shock(:,k); % nominal gdp growth
+    pb_stoch = pb_shock(:,k); % primary balance
+
+    % ... and through values of adjustmentGrid
+    for i = 1:length(adjustmentGrid)
+
+        [D_temp(:,i),~,~,~,~,~,~,~,~] = project_debt5_1v(scenario,adjustmentGrid(i), iir, potgdp,...
+            og, epsilon,m,dcoa,dprop,sfa,inflation,rgdp_initial, debt_initial,alpha_initial,beta_initial, spb,...
+           i_st,i_lt,...
+            share_lt_maturing,pb,ob,sb,stochMethod,g_stoch,...
+            pb_stoch,iir_stoch,adjustmentPeriods,theta_lt);
+    end
+
+% store 2D matrix
+D_stoch(:,:,k) = D_temp;
+end
+
+% Close waitbar after completion
+close(h);
 
 %% STOCHASTIC DEBT PATHS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%                
 % Initialize variables and load data

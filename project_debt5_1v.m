@@ -293,6 +293,11 @@ for t = before_adjustment_start_t:periods
         iir(t) = iir(t) + iir_shock(t);
 
     elseif stoch_method == 3
+        % Not reachable: runDsaModel5_1.m accepts only 1 or 2. Kept because it
+        % records the distinction that matters here -- methods 1 and 2 ADD
+        % shocks to the baseline, so they need a series of shocks, while this
+        % branch REPLACES the baseline with a historical level. The AMECO
+        % blocks on the STOCH sheet are levels and belong only here.
         if t > adjustment_end_t && t <= stoch_end
             % Replace baseline value with historical value
             g(t) = g_shock(t);

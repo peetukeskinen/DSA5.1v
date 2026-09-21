@@ -34,7 +34,7 @@
 
     % STOCHASTIC METHOD:
         % 1) Normal Distribution Simulation
-        % 2) Bootstrap Simulation shock as deviations
+        % 2) Moving block bootstrap of the same historical shocks
 
     % SAVE RESULTS:
         % 1) Save as .mat file
