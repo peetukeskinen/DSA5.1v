@@ -443,8 +443,18 @@ elseif debt_increasing(t) <= 0 && debt_rolled(t) >= 0
     % short term share
     alpha(t) = 0;
 
-    % new long term debt in long term debt
-    beta(t) = 1;
+    % new long term debt in long term debt.
+    % This branch is reached when debt falls by MORE than the amount
+    % maturing: everything due is repaid and more besides, so nothing is
+    % issued. beta is the share of the long-term stock that is NEWLY
+    % issued, so it is 0 here and the surviving stock keeps its coupons.
+    % beta = 1 repriced the whole stock at the current market rate, which
+    % lifted the implicit rate by about 1 percentage point the year after a
+    % plan began deleveraging faster than its debt matured, and cost 1.8
+    % points of the final debt ratio on the baseline Finnish plan. The sign
+    % of that error follows the market rate, so it was wrong rather than
+    % conservative.
+    beta(t) = 0;
     
 end
 
